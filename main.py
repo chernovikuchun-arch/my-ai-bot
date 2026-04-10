@@ -69,3 +69,14 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+import os
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+app = web.Application()
+app.router.add_get('/', handle)
+
+# Buni main funksiyasiga qo'shish yoki alohida ishga tushirish mumkin
+# Lekin hozircha shunchaki Start Command-ni bering, ko'ramiz.
