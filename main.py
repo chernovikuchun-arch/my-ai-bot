@@ -10,115 +10,98 @@ from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile
 from aiohttp import web
 
-# --- KONFIGURATSIYA ---
-API_TOKEN       = "8305734962:AAGFTI29uR8EI2jbgjWMIIM6x2MnrKImBNw"
-REPLICATE_TOKEN = "r8_Kgev4Gwe538Ii1d3lIxPZq5h4gsUu9I17ztmt"
-ADMIN_ID        = 580105818
+# --- KONFIGURATSIYA (Render Environment Variables'dan oladi) ---
+API_TOKEN       = os.environ.get("API_TOKEN") # Render'da qo'shishni unutmang
+REPLICATE_TOKEN = os.environ.get("REPLICATE_API_TOKEN")
+ADMIN_ID        = 580105818 # O'zingizning ID'ingizni qoldiring
 
-os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
+# Logging sozlamalari
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 bot = Bot(token=API_TOKEN)
-dp  = Dispatcher()
+dp = Dispatcher()
 
 async def handle(request):
-    return web.Response(text="Bot ishlayapti ✅")
+    return web.Response(text="Bot muvaffaqiyatli ishlayapti! ✅")
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     await message.answer(
-        "Salom! 👋\n\n"
-        "1️⃣ Rasm yuboring\n"
-        "2️⃣ Rasmga <b>reply</b> qilib prompt yozing\n"
-        "3️⃣ AI yangi rasm yaratadi ✨",
+        "<b>Salom! AI Rasm Botga xush kelibsiz!</b> 👋\n\n"
+        "1️⃣ Avval rasm yuboring.\n"
+        "2️⃣ Keyin o'sha rasmga <b>Reply</b> qilib xohlagan uslubingizni yozing.\n"
+        "<i>Masalan: cyberpunk style, anime, oil painting</i>",
         parse_mode="HTML"
     )
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
-    await message.reply(
-        "✅ Rasm qabul qilindi!\n"
-        "Endi shu rasmga <b>reply</b> qilib prompt yozing.\n\n"
-        "Masalan: <i>anime style, oil painting, cyberpunk</i>",
-        parse_mode="HTML"
-    )
+    await message.reply("✅ Rasm qabul qilindi! Endi unga <b>Reply</b> qilib prompt yozing.")
 
 @dp.message(F.text)
 async def handle_prompt(message: Message):
+    # Faqat reply qilingan va rasm bor xabarlarni tekshirish
     if not message.reply_to_message or not message.reply_to_message.photo:
-        await message.answer(
-            "⚠️ Avval rasm yuboring, so'ng unga <b>reply</b> qilib prompt yozing.",
-            parse_mode="HTML"
-        )
         return
 
-    prompt   = message.text.strip()
+    prompt = message.text.strip()
     photo_id = message.reply_to_message.photo[-1].file_id
-    wait_msg = await message.answer("⏳ AI rasm yaratmoqda, kuting...")
+    wait_msg = await message.answer("⏳ AI rasm tayyorlamoqda, kuting...")
 
     try:
-        file     = await bot.get_file(photo_id)
+        # 1. Rasmni yuklab olish
+        file = await bot.get_file(photo_id)
         file_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file.file_path}"
 
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url) as resp:
                 image_bytes = await resp.read()
 
+        # 2. Rasmni optimallashtirish
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        img = img.resize((1024, 1024))
+        img.thumbnail((1024, 1024))
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
+        img.save(buf, format="JPEG", quality=85)
         buf.seek(0)
 
+        # 3. Replicate orqali generatsiya
+        # Flux-dev modeli image-to-image uchun 'image' parametrini ishlatadi
         output = await asyncio.to_thread(
             replicate.run,
-            "black-forest-labs/flux-schnell",
+            "black-forest-labs/flux-dev",
             input={
-                "prompt":         prompt,
-                "image":          buf,
-                "strength":       0.75,
-                "num_outputs":    1,
-                "aspect_ratio":   "1:1",
-                "output_format":  "png",
-                "output_quality": 100,
+                "prompt": prompt,
+                "image": buf,
+                "prompt_strength": 0.8,
+                "num_outputs": 1,
+                "guidance_scale": 7.5
             }
         )
 
         image_url = str(output[0]) if isinstance(output, list) else str(output)
 
+        # 4. Natijani yuborish
         async with aiohttp.ClientSession() as session:
             async with session.get(image_url) as resp:
                 result_bytes = await resp.read()
 
         await message.answer_photo(
-            photo=BufferedInputFile(result_bytes, filename="result.png"),
-            caption="✨ Mana yangi rasm!"
-        )
-
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=BufferedInputFile(result_bytes, filename="admin.png"),
-            caption=(
-                f"✅ Yangi generatsiya\n"
-                f"👤 {message.from_user.full_name}\n"
-                f"🆔 {message.from_user.id}\n"
-                f"📝 {prompt}"
-            )
+            photo=BufferedInputFile(result_bytes, filename="result.jpg"),
+            caption=f"✨ <b>Natija:</b> {prompt}",
+            parse_mode="HTML"
         )
 
     except Exception as e:
-        logging.error(f"Xato: {e}")
-        await message.answer("❌ Xatolik yuz berdi, qayta urinib ko'ring.")
-        await bot.send_message(ADMIN_ID, f"❌ Xato: {str(e)[:500]}")
+        logging.error(f"Xatolik: {e}")
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)[:100]}")
 
     finally:
         try:
-            await bot.delete_message(message.chat.id, wait_msg.message_id)
+            await wait_msg.delete()
         except:
             pass
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
-
     app = web.Application()
     app.router.add_get("/", handle)
     runner = web.AppRunner(app)
@@ -127,10 +110,9 @@ async def main():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
 
-    await asyncio.gather(
-        site.start(),
-        dp.start_polling(bot, drop_pending_updates=True)
-    )
+    await site.start()
+    logging.info(f"Server {port}-portda ishga tushdi")
+    await dp.start_polling(bot, drop_pending_updates=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
