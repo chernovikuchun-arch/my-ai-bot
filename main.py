@@ -13,18 +13,18 @@ from aiohttp import web
 # --- KONFIGURATSIYA ---
 API_TOKEN = '8305734962:AAGFTI29uR8EI2jbgjWMIIM6x2MnrKImBNw'
 STABILITY_KEY = 'sk-CJfzKSl4fHK3wV4lW3x8VRFyW3ZMXNpj5dgnojWB6He5vOac'
-ADMIN_ID = 580105818  # Sizning ID raqamingiz
+ADMIN_ID = 580105818
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 user_data = {}
 
 async def handle(request):
-    return web.Response(text="Bot Admin Control Mode is Active!")
+    return web.Response(text="Bot Admin & Error Fix Mode Active!")
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("Salom! Rasm yuboring, so'ng uni qanday o'zgartirishni yozing.")
+    await message.answer("Salom! Rasm yuboring, so'ng prompt yozing. Admin nazorati yoqilgan.")
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
@@ -40,61 +40,54 @@ async def handle_prompt(message: Message):
 
     prompt = message.text
     photo_id = user_data[user_id]['photo_id']
-    await message.answer("AI chizmoqda, bir oz kuting...")
+    await message.answer("AI ishlamoqda...")
 
-    # 1. Telegramdan rasmni olish
     file = await bot.get_file(photo_id)
     file_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file.file_path}"
     
-    # 2. Model ID (Eng barqaror SDXL modeli)
     url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image"
     
-    headers = {
-        "Accept": "application/json",
-        "Authorization": f"Bearer {STABILITY_KEY}"
-    }
-
     async with aiohttp.ClientSession() as session:
         async with session.get(file_url) as resp:
             image_bytes = await resp.read()
 
-        # 3. O'lchamni to'g'rilash (Limitdan oshib ketmaslik uchun)
-        img = Image.open(io.BytesIO(image_bytes))
-        img = img.convert("RGB")
-        img = img.resize((1024, 1024)) 
+        # O'lchamni 1024x1024 ga majburlash (SDXL uchun qat'iy talab)
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img = img.resize((1024, 1024))
         
         byte_arr = io.BytesIO()
         img.save(byte_arr, format='PNG')
         resized_bytes = byte_arr.getvalue()
 
-        # 4. Stability AI ga so'rov
         data = aiohttp.FormData()
-        data.add_field("init_image", resized_bytes, filename="img.png")
+        data.add_field("init_image", resized_bytes, filename="img.png", content_type="image/png")
         data.add_field("text_prompts[0][text]", prompt)
         data.add_field("image_strength", "0.4")
         data.add_field("cfg_scale", "7")
         data.add_field("steps", "30")
 
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {STABILITY_KEY}"}
+
         async with session.post(url, headers=headers, data=data) as response:
             if response.status == 200:
                 res = await response.json()
                 img_data = base64.b64decode(res["artifacts"][0]["base64"])
-                output_photo = BufferedInputFile(img_data, filename="res.png")
                 
                 # Foydalanuvchiga yuborish
-                await message.answer_photo(photo=output_photo, caption="Tayyor!")
+                await message.answer_photo(photo=BufferedInputFile(img_data, filename="res.png"), caption="Tayyor!")
                 
-                # --- ADMINGA YUBORISH ---
-                try:
-                    admin_caption = f"👤 Foydalanuvchi: {message.from_user.full_name}\n🆔 ID: {user_id}\n📝 Prompt: {prompt}"
-                    await bot.send_photo(chat_id=ADMIN_ID, photo=BufferedInputFile(img_data, filename="admin.png"), caption=admin_caption)
-                except Exception as e:
-                    logging.error(f"Adminga yuborishda xato: {e}")
+                # Adminga yuborish (Sizga)
+                admin_msg = f"👤 {message.from_user.full_name}\n🆔 {user_id}\n📝 {prompt}"
+                await bot.send_photo(chat_id=ADMIN_ID, photo=BufferedInputFile(img_data, filename="adm.png"), caption=admin_msg)
                 
                 del user_data[user_id]
             else:
-                err = await response.json()
-                await message.answer(f"Xatolik: {err.get('message', 'Noma'lum xato')}")
+                # Xatolikni to'liq ko'rish uchun logga chiqaramiz
+                error_json = await response.json()
+                error_text = error_json.get('message', str(error_json))
+                await message.answer(f"AI Xatosi: {error_text}")
+                # Adminga xatoni ham yuboramiz
+                await bot.send_message(ADMIN_ID, f"❌ Xatolik yuz berdi:\nUser: {user_id}\nError: {error_text}")
 
 async def main():
     app = web.Application()
